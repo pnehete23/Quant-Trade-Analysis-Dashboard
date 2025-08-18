@@ -113,10 +113,16 @@ class MomentumStrategy:
         df.loc[(df['MA_Signal'] == 1) & (df['RSI_Confirm'] >= 0), 'Signal'] = 1  # Buy
         df.loc[(df['MA_Signal'] == -1) & (df['RSI_Confirm'] <= 0), 'Signal'] = -1  # Sell
         
-        # Position sizing
-        df['Position_Size'] = df.apply(
-            lambda row: self.calculate_position_size(row['Volatility'], 100000), axis=1
-        )
+        # Position sizing (vectorized)
+        base_vol = 0.20
+        vol_series = df['Volatility'].copy()
+        vol_series = vol_series.replace(0, np.nan)
+        pos = self.max_position_size * (base_vol / vol_series)
+        pos = pos.clip(upper=self.max_position_size)
+        # Where volatility is NaN (including zeros), set position to 0; else enforce a 1% floor
+        pos = pos.where(vol_series.notna(), 0)
+        pos = np.where(pos > 0, np.maximum(pos, 0.01), 0)
+        df['Position_Size'] = pos
         
         # Entry and exit points
         df['Position'] = df['Signal'].shift(1)  # Take position next day

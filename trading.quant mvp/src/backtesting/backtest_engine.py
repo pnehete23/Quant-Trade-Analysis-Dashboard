@@ -167,54 +167,45 @@ class BacktestEngine:
         # Ensure data is aligned
         aligned_data = price_data.join(strategy_signals, how='inner')
         
+        last_price = None
+        symbol = 'ASSET'
+        
         for date, row in aligned_data.iterrows():
             self.current_date = date
             
-            # Get current prices (use 'Close' or 'Adj Close')
-            # Handle both string and MultiIndex (tuple) column labels robustly
-            current_prices = {}
-            for col in aligned_data.columns:
-                col_str = str(col)
-                if col_str.endswith('Close') or col_str == 'Close':
-                    symbol_name = col_str.replace('_Close', '')
-                    current_prices[symbol_name] = row[col]
-
-            # Fallback for single 'Close' column case
-            if ('Close' in getattr(row, 'index', [])) or ('Close' in row):
-                first_col = aligned_data.columns[0]
-                first_col_str = str(first_col)
-                symbol = first_col_str.split('_')[0] if '_' in first_col_str else 'ASSET'
-                current_prices = {symbol: row['Close']}
+            # Extract price safely
+            price = row['Close'] if 'Close' in row.index else (row.get('Adj Close') if 'Adj Close' in row.index else np.nan)
+            if not pd.isna(price):
+                last_price = price
+            current_prices = {symbol: price} if not pd.isna(price) else {}
             
-            # Process signals
-            for symbol in current_prices.keys():
-                signal_col = f'{symbol}_Signal' if f'{symbol}_Signal' in row else 'Signal'
-                if signal_col in row and not pd.isna(row[signal_col]):
-                    signal = row[signal_col]
-                    price = current_prices[symbol]
-                    
-                    # Determine position size
-                    if position_sizer:
-                        target_quantity = position_sizer(
-                            signal, price, self.cash, 
-                            self.calculate_portfolio_value(current_prices)
-                        )
+            # Extract signal safely
+            signal = row['Signal'] if 'Signal' in row.index and not pd.isna(row['Signal']) else None
+            
+            if signal is not None and not pd.isna(price):
+                current_position = self.positions.get(symbol, 0)
+                
+                if position_sizer:
+                    # Custom sizer: delegate when an entry is desired, close fully on non-positive signal
+                    if signal > 0 and current_position == 0:
+                        target_quantity = position_sizer(signal, price, self.cash, self.calculate_portfolio_value(current_prices))
+                    elif signal <= 0 and current_position > 0:
+                        target_quantity = 0
                     else:
-                        # Default position sizing
-                        if signal > 0:
-                            target_value = self.cash * 0.1  # 10% of cash
-                            target_quantity = int(target_value / price)
-                        elif signal < 0:
-                            target_quantity = -self.positions.get(symbol, 0)  # Close position
-                        else:
-                            target_quantity = 0
-                    
-                    # Calculate trade quantity needed
-                    current_position = self.positions.get(symbol, 0)
-                    trade_quantity = target_quantity - current_position
-                    
-                    if trade_quantity != 0:
-                        self.execute_trade(symbol, trade_quantity, price, date)
+                        target_quantity = current_position
+                else:
+                    # Default: enter on positive signal if flat; exit fully on non-positive signal
+                    if signal > 0 and current_position == 0:
+                        target_value = self.cash * 0.1  # 10% of cash
+                        target_quantity = int(target_value / price)
+                    elif signal <= 0 and current_position > 0:
+                        target_quantity = 0
+                    else:
+                        target_quantity = current_position
+                
+                trade_quantity = target_quantity - current_position
+                if trade_quantity != 0:
+                    self.execute_trade(symbol, trade_quantity, price, date)
             
             # Update portfolio history
             portfolio_value = self.calculate_portfolio_value(current_prices)
@@ -227,15 +218,18 @@ class BacktestEngine:
             self.portfolio_history.append(portfolio_state)
         
         # Close any remaining open trades
-        final_prices = current_prices
-        for symbol, trade in self.open_trades.items():
-            if symbol in final_prices:
-                trade.exit_date = self.current_date
-                trade.exit_price = final_prices[symbol]
-                trade.pnl = (final_prices[symbol] - trade.entry_price) * trade.quantity
-                trade.duration = (self.current_date - trade.entry_date).days
-                trade.return_pct = trade.pnl / (trade.entry_price * trade.quantity)
-                self.trades.append(trade)
+        # Close any remaining open trades at last known price
+        if last_price is not None:
+            final_prices = {symbol: last_price}
+            for sym, trade in list(self.open_trades.items()):
+                if sym in final_prices:
+                    trade.exit_date = self.current_date
+                    trade.exit_price = final_prices[sym]
+                    trade.pnl = (final_prices[sym] - trade.entry_price) * trade.quantity
+                    trade.duration = (self.current_date - trade.entry_date).days
+                    trade.return_pct = trade.pnl / (trade.entry_price * trade.quantity)
+                    self.trades.append(trade)
+                    del self.open_trades[sym]
         
         return self.calculate_performance_metrics()
     

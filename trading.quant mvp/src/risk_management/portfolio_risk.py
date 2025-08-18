@@ -167,26 +167,48 @@ class PortfolioRiskManager:
     
     def correlation_analysis(self, returns_df: pd.DataFrame) -> Dict:
         """Analyze correlations between assets"""
+        if returns_df is None or returns_df.empty:
+            return {
+                'correlation_matrix': pd.DataFrame(),
+                'average_correlation': np.nan,
+                'max_correlation': np.nan,
+                'min_correlation': np.nan,
+                'max_corr_pair': None,
+                'min_corr_pair': None
+            }
+
         corr_matrix = returns_df.corr()
-        
-        # Calculate average correlation
+
+        # Single-asset or degenerate cases: return safe defaults
+        if corr_matrix.shape[0] < 2:
+            return {
+                'correlation_matrix': corr_matrix,
+                'average_correlation': 0.0,
+                'max_correlation': np.nan,
+                'min_correlation': np.nan,
+                'max_corr_pair': None,
+                'min_corr_pair': None
+            }
+
+        # Calculate average correlation (exclude self-correlations)
         n = len(corr_matrix)
-        avg_correlation = (corr_matrix.sum().sum() - n) / (n * (n - 1))
-        
-        # Find highest and lowest correlations
-        corr_values = corr_matrix.values
-        np.fill_diagonal(corr_values, np.nan)  # Ignore diagonal
-        
-        max_corr = np.nanmax(corr_values)
-        min_corr = np.nanmin(corr_values)
-        
-        # Find the pairs
-        max_idx = np.unravel_index(np.nanargmax(corr_values), corr_values.shape)
-        min_idx = np.unravel_index(np.nanargmin(corr_values), corr_values.shape)
-        
-        max_pair = (corr_matrix.index[max_idx[0]], corr_matrix.columns[max_idx[1]])
-        min_pair = (corr_matrix.index[min_idx[0]], corr_matrix.columns[min_idx[1]])
-        
+        avg_correlation = (corr_matrix.values.sum() - n) / (n * (n - 1))
+
+        # Find highest and lowest correlations excluding diagonal and all-NaN cases
+        corr_values = corr_matrix.values.astype(float).copy()
+        np.fill_diagonal(corr_values, np.nan)
+
+        if np.isnan(corr_values).all():
+            max_corr = min_corr = np.nan
+            max_pair = min_pair = None
+        else:
+            max_idx = np.unravel_index(np.nanargmax(corr_values), corr_values.shape)
+            min_idx = np.unravel_index(np.nanargmin(corr_values), corr_values.shape)
+            max_corr = corr_values[max_idx]
+            min_corr = corr_values[min_idx]
+            max_pair = (corr_matrix.index[max_idx[0]], corr_matrix.columns[max_idx[1]])
+            min_pair = (corr_matrix.index[min_idx[0]], corr_matrix.columns[min_idx[1]])
+
         return {
             'correlation_matrix': corr_matrix,
             'average_correlation': avg_correlation,
