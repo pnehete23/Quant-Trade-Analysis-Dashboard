@@ -37,6 +37,39 @@ DEFAULT_WATCHLIST = "AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA, AVGO, JPM, SPY, 
 BENCHMARKS = ["SPY", "QQQ", "IWM"]
 
 
+# ---------- UI helpers ----------
+
+def how_to_card(title: str, steps: list[str], tip: str | None = None):
+    """Render a clear instructional banner at the top of a page."""
+    bullets = "".join(f"<li style='margin:.15rem 0;'>{s}</li>" for s in steps)
+    tip_html = (f'<div style="margin-top:.6rem;color:#ffb547;font-size:.82rem;">'
+                f'💡 <b>Tip:</b> {tip}</div>') if tip else ""
+    st.markdown(f"""
+<div style="background:linear-gradient(135deg,#1a1f2c 0%,#161c27 100%);
+            border:1px solid #2a3142;border-radius:10px;
+            padding:.85rem 1.1rem;margin:.2rem 0 1rem 0;">
+  <div style="color:#00d4aa;font-weight:600;font-size:.92rem;margin-bottom:.4rem;">
+    📖 {title}
+  </div>
+  <ol style="margin:0;padding-left:1.1rem;color:#c8d1e0;font-size:.86rem;">{bullets}</ol>
+  {tip_html}
+</div>
+""", unsafe_allow_html=True)
+
+
+def kpi_strip(items: list[tuple[str, str, str]]):
+    """Render a compact KPI strip below charts. items = [(label, value, color), ...]"""
+    cols = st.columns(len(items))
+    for col, (label, value, color) in zip(cols, items):
+        col.markdown(f"""
+<div style="background:#161c27;border:1px solid {color}55;border-left:3px solid {color};
+            border-radius:8px;padding:.55rem .8rem;">
+  <div style="color:#8a96aa;font-size:.72rem;text-transform:uppercase;letter-spacing:.5px;">{label}</div>
+  <div style="color:{color};font-weight:600;font-size:1.05rem;margin-top:.15rem;">{value}</div>
+</div>
+""", unsafe_allow_html=True)
+
+
 # ---------- Page config & theme ----------
 
 st.set_page_config(
@@ -190,6 +223,24 @@ def chart_price(data: pd.DataFrame, signals_df: pd.DataFrame | None,
         wins = trades_df[trades_df["pnl"] > 0]
         losses = trades_df[trades_df["pnl"] <= 0]
 
+        # KPI annotations: best & worst trades with stars + callouts
+        best = trades_df.loc[trades_df["pnl"].idxmax()]
+        worst = trades_df.loc[trades_df["pnl"].idxmin()]
+        fig.add_annotation(
+            x=best["exit_date"], y=best["exit_price"],
+            text=f"⭐ Best: ${best['pnl']:+,.0f} ({best['return_pct']*100:+.1f}%)",
+            showarrow=True, arrowhead=2, arrowcolor="#ffd700", arrowwidth=1.5,
+            bgcolor="rgba(255,215,0,0.15)", bordercolor="#ffd700", borderwidth=1,
+            font=dict(color="#ffd700", size=11), ax=0, ay=-50, row=1, col=1,
+        )
+        fig.add_annotation(
+            x=worst["exit_date"], y=worst["exit_price"],
+            text=f"⚠ Worst: ${worst['pnl']:+,.0f} ({worst['return_pct']*100:+.1f}%)",
+            showarrow=True, arrowhead=2, arrowcolor="#ff4d6d", arrowwidth=1.5,
+            bgcolor="rgba(255,77,109,0.15)", bordercolor="#ff4d6d", borderwidth=1,
+            font=dict(color="#ff4d6d", size=11), ax=0, ay=50, row=1, col=1,
+        )
+
         # Entry markers
         fig.add_trace(go.Scatter(
             x=trades_df["entry_date"], y=trades_df["entry_price"], mode="markers",
@@ -272,19 +323,58 @@ def chart_price(data: pd.DataFrame, signals_df: pd.DataFrame | None,
 
 def chart_performance(portfolio_history: pd.DataFrame) -> go.Figure:
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        subplot_titles=("Portfolio Value", "Drawdown %"),
+                        subplot_titles=("Portfolio Value (key moments highlighted)",
+                                        "Drawdown %"),
                         vertical_spacing=0.08, row_heights=[0.65, 0.35])
-    fig.add_trace(go.Scatter(x=portfolio_history.index, y=portfolio_history["Portfolio_Value"],
-                             name="Portfolio", fill="tozeroy",
+    pv = portfolio_history["Portfolio_Value"]
+    fig.add_trace(go.Scatter(x=pv.index, y=pv, name="Portfolio", fill="tozeroy",
                              line=dict(color="#00d4aa", width=2),
-                             fillcolor="rgba(0,212,170,0.12)"), row=1, col=1)
-    rolling_max = portfolio_history["Portfolio_Value"].expanding().max()
-    dd = (portfolio_history["Portfolio_Value"] - rolling_max) / rolling_max * 100
-    fig.add_trace(go.Scatter(x=portfolio_history.index, y=dd, name="Drawdown",
+                             fillcolor="rgba(0,212,170,0.12)",
+                             hovertemplate="$%{y:,.0f}<extra></extra>"), row=1, col=1)
+
+    # Identify peak before max DD and trough = the dip itself
+    rolling_max = pv.expanding().max()
+    dd_series = (pv - rolling_max) / rolling_max * 100
+    if not dd_series.empty:
+        trough_idx = dd_series.idxmin()
+        peak_idx = pv.loc[:trough_idx].idxmax() if trough_idx in pv.index else pv.idxmax()
+        peak_val = float(pv.loc[peak_idx])
+        trough_val = float(pv.loc[trough_idx])
+        max_dd_pct = float(dd_series.min())
+
+        # Shade max-DD window on equity curve
+        fig.add_vrect(x0=peak_idx, x1=trough_idx,
+                      fillcolor="rgba(255,77,109,0.10)", line_width=0,
+                      annotation_text=f"Max DD: {max_dd_pct:.1f}%",
+                      annotation_position="top left",
+                      annotation_font_color="#ff4d6d", row=1, col=1)
+        # Peak marker (gold star) and trough marker (red X)
+        fig.add_trace(go.Scatter(x=[peak_idx], y=[peak_val], mode="markers",
+                                 marker=dict(symbol="star", color="#ffd700",
+                                             size=14, line=dict(color="white", width=1)),
+                                 name="Peak", showlegend=False,
+                                 hovertemplate=f"<b>Peak</b><br>${peak_val:,.0f}<br>%{{x|%Y-%m-%d}}<extra></extra>"),
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(x=[trough_idx], y=[trough_val], mode="markers",
+                                 marker=dict(symbol="x", color="#ff4d6d",
+                                             size=14, line=dict(color="white", width=2)),
+                                 name="DD trough", showlegend=False,
+                                 hovertemplate=f"<b>Trough</b><br>${trough_val:,.0f}<br>%{{x|%Y-%m-%d}}<extra></extra>"),
+                      row=1, col=1)
+        # Final value marker
+        fig.add_trace(go.Scatter(x=[pv.index[-1]], y=[float(pv.iloc[-1])], mode="markers",
+                                 marker=dict(symbol="circle", color="#00d4aa",
+                                             size=12, line=dict(color="white", width=2)),
+                                 name="Today", showlegend=False,
+                                 hovertemplate=f"<b>Latest</b><br>${float(pv.iloc[-1]):,.0f}<extra></extra>"),
+                      row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=dd_series.index, y=dd_series, name="Drawdown",
                              fill="tozeroy", line=dict(color="#ff4d6d"),
-                             fillcolor="rgba(255,77,109,0.25)"), row=2, col=1)
-    fig.update_layout(template=PLOTLY_TEMPLATE, height=520, showlegend=False,
-                      margin=dict(l=10, r=10, t=40, b=10))
+                             fillcolor="rgba(255,77,109,0.25)",
+                             hovertemplate="%{y:.2f}%<extra></extra>"), row=2, col=1)
+    fig.update_layout(template=PLOTLY_TEMPLATE, height=560, showlegend=False,
+                      hovermode="x unified", margin=dict(l=10, r=10, t=50, b=10))
     return fig
 
 
@@ -335,7 +425,9 @@ def render_topbar() -> dict:
         with p[3]:
             max_pos = st.number_input("Max position", 0.05, 1.0, 0.10, 0.05, format="%.2f")
         with p[4]:
-            diagnostics = st.toggle("Diagnostics", value=False)
+            st.write("")
+            st.caption("📊 Diagnostics tab is always on — see last tab.")
+            diagnostics = True
 
     return dict(
         mode=mode, ticker=ticker_in, tickers_raw=tickers_in,
@@ -586,16 +678,37 @@ def render_overview(ticker, data, signals_df, perf, backtest_results):
               delta=f"{actual_trades} executed trades")
 
     render_action_banner(ticker, data, signals_df, trades_df)
+
+    # Visual KPIs ribbon: best trade, worst trade, current MA spread
+    if trades_df is not None and not trades_df.empty:
+        best = trades_df.loc[trades_df["pnl"].idxmax()]
+        worst = trades_df.loc[trades_df["pnl"].idxmin()]
+        last_close = float(data["Close"].iloc[-1])
+        ms_last = float(signals_df["MA_Short"].iloc[-1] or 0)
+        ml_last = float(signals_df["MA_Long"].iloc[-1] or 0)
+        spread = ((ms_last / ml_last - 1) * 100) if ml_last else 0
+        rsi_last = float(signals_df["RSI"].iloc[-1] or 0)
+        kpi_strip([
+            ("⭐ Best trade", f"${best['pnl']:+,.0f} ({best['return_pct']*100:+.1f}%)", "#ffd700"),
+            ("⚠ Worst trade", f"${worst['pnl']:+,.0f} ({worst['return_pct']*100:+.1f}%)", "#ff4d6d"),
+            ("📏 MA spread today", f"{spread:+.2f}%", "#00d4aa" if spread > 0 else "#ff4d6d"),
+            ("🌡 RSI today", f"{rsi_last:.1f}",
+             "#ff4d6d" if rsi_last > 70 else "#00d4aa" if rsi_last < 30 else "#7c5cff"),
+        ])
+
     st.plotly_chart(chart_price(data, signals_df, trades_df), use_container_width=True)
 
-    with st.expander("How to read this chart", expanded=False):
+    with st.expander("📘 How to read this chart", expanded=False):
         st.markdown("""
 - **Green ▲ markers** = strategy entered a long position (bought).
 - **Green ▼ markers** = position closed at a profit.
 - **Red ▼ markers** = position closed at a loss.
-- **Dotted lines** connect entry → exit for each trade (green = profit, red = loss).
-- **Orange/Purple lines** = short / long moving averages driving the signals.
-- **RSI panel** shows momentum; dashed lines mark overbought (70) / oversold (30).
+- **Dotted lines** connect entry → exit (green = profit, red = loss).
+- **⭐ Gold star annotation** = your best trade in this period.
+- **⚠ Red annotation** = your worst trade — study what went wrong.
+- **Orange / Purple lines** = short / long moving averages driving the signals.
+- **RSI panel**: dashed lines mark overbought (70) / oversold (30).
+- **Range buttons** (1M / 3M / 6M / YTD / 1Y / All) zoom the chart.
 - The **action banner** above tells you what the strategy would do *today*.
 """)
 
@@ -781,19 +894,54 @@ buy-and-hold benchmark of **{perf['benchmark_return']:.2%}** (alpha: **{perf['al
 
 
 def render_diagnostics(data, signals_df):
-    st.subheader("Diagnostics")
-    if not st.session_state.get("diagnostics_on"):
-        st.info("Enable Diagnostics in the parameters expander to view this section.")
-        return
-    st.markdown("**Snapshot**")
-    st.write({"rows": int(len(data)), "columns": list(data.columns),
-              "range": f"{data.index.min().date()} -> {data.index.max().date()}"})
-    st.dataframe(data.head(), use_container_width=True)
-    st.markdown("**Missing values**")
-    st.table(data.isna().sum().rename("missing_count").to_frame())
-    expected = ["MA_Short", "MA_Long", "RSI", "Signal", "Strategy_Returns"]
-    present = {c: c in signals_df.columns for c in expected}
-    st.write({"signals_present": present})
+    """Always visible (no toggle). Shown as the last tab on the Backtest page."""
+    st.subheader("🔧 Data & Signal Diagnostics")
+    st.caption("Behind-the-scenes data quality checks and signal column verification. "
+               "Use this if numbers look off.")
+
+    # Quick health pills
+    n = len(data)
+    nan_share = data.isna().mean().mean() * 100
+    expected = ["MA_Short", "MA_Long", "RSI", "Signal", "Strategy_Returns", "Position"]
+    present_count = sum(1 for c in expected if c in signals_df.columns)
+    sig_count = (signals_df["Signal"].abs() > 0).sum() if "Signal" in signals_df.columns else 0
+    kpi_strip([
+        ("Rows", f"{n:,}", "#00d4aa" if n > 200 else "#ffb547"),
+        ("Missing %", f"{nan_share:.2f}%",
+         "#00d4aa" if nan_share < 1 else "#ffb547" if nan_share < 5 else "#ff4d6d"),
+        ("Signals computed", f"{present_count}/{len(expected)}",
+         "#00d4aa" if present_count == len(expected) else "#ff4d6d"),
+        ("Active signals", f"{sig_count:,}",
+         "#00d4aa" if sig_count > 5 else "#ffb547"),
+    ])
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.markdown("**📦 Data snapshot**")
+        st.write({
+            "rows": int(n),
+            "columns": list(data.columns),
+            "range": f"{data.index.min().date()} → {data.index.max().date()}",
+        })
+        st.markdown("**🧩 Missing values per column**")
+        st.dataframe(data.isna().sum().rename("missing").to_frame(),
+                     use_container_width=True)
+    with c2:
+        st.markdown("**📐 Signal coverage**")
+        cov = pd.DataFrame({
+            "column": expected,
+            "present": ["✓" if c in signals_df.columns else "✗" for c in expected],
+            "non_null": [int(signals_df[c].notna().sum()) if c in signals_df.columns else 0
+                         for c in expected],
+        })
+        st.dataframe(cov, use_container_width=True, hide_index=True)
+        if "Signal" in signals_df.columns:
+            st.markdown("**📊 Signal distribution**")
+            dist = signals_df["Signal"].value_counts(dropna=False).to_frame("count")
+            dist.index = dist.index.map({1: "BUY (+1)", 0: "HOLD (0)", -1: "SELL (-1)"}).fillna("OTHER")
+            st.dataframe(dist, use_container_width=True)
+
+    st.markdown("**🔚 Last 15 rows of computed signals**")
     available = [c for c in expected if c in signals_df.columns]
     if available:
         st.dataframe(signals_df[available].tail(15), use_container_width=True)
@@ -835,6 +983,17 @@ def render_watchlist_page():
         '<div class="topbar"><h1>Watchlist Scanner</h1>'
         '<div class="sub">Scan multiple tickers and surface what the strategy says to do today.</div></div>',
         unsafe_allow_html=True,
+    )
+    how_to_card(
+        "How to use the Watchlist Scanner",
+        [
+            "Paste up to 30 tickers separated by commas (default = 15 large-caps + sector ETFs).",
+            "Pick a lookback window (1y is the sweet spot — enough data, fast scan).",
+            "Press <b>Scan</b>. Results cache for 15 min so re-running is instant.",
+            "Sort the table by <b>Signal</b> to see all current BUYs/SELLs at the top.",
+            "Sort by <b>MA spread %</b> within BUYs to see the strongest trends.",
+        ],
+        tip="Open this page first thing each morning. BUYs with high MA spread + low signal age = freshest setups."
     )
     c = st.columns([3, 1, 1, 1, 1, 1])
     with c[0]:
@@ -923,6 +1082,17 @@ def render_compare_page():
         '<div class="topbar"><h1>Strategy Comparison</h1>'
         '<div class="sub">Run momentum, mean-reversion, and buy-and-hold side-by-side on the same data.</div></div>',
         unsafe_allow_html=True,
+    )
+    how_to_card(
+        "How to use Strategy Comparison",
+        [
+            "Pick a ticker and date range. 3 years gives a meaningful comparison.",
+            "Press <b>Compare</b>. Three strategies run on the same data automatically.",
+            "Top chart: equity curves overlaid — the steepest line wins. Look for which strategy beat <b>buy-and-hold</b>.",
+            "Bottom chart: normalized vs SPY/QQQ/IWM — tells you if you're actually beating broad-market beta.",
+            "Use the table for hard numbers: Sharpe, Max DD, Volatility, Trade count.",
+        ],
+        tip="If your strategy underperforms buy-and-hold AND has worse drawdowns, it's adding negative value. Move on."
     )
     c = st.columns([1.5, 1.2, 1.2, 1.2, 1])
     with c[0]:
@@ -1079,11 +1249,18 @@ def render_optimize_page():
         st.write(""); st.write("")
         go_opt = st.button("Run", type="primary", use_container_width=True)
 
+    how_to_card(
+        "How to use Optimize & Validate",
+        [
+            "Pick a ticker and a long history (3-4 years gives meaningful walk-forward).",
+            "Press <b>Run</b>. Three checks fire automatically.",
+            "<b>Check 1 (Walk-forward)</b>: train on first 70%, test on last 30%. If the test equity curve diverges down from train, the strategy is overfit.",
+            "<b>Check 2 (Heatmap)</b>: each cell = one parameter combo. Look for a <b>green region</b> (robust). Isolated green cells = curve-fit luck.",
+            "<b>Check 3 (Cost sensitivity)</b>: see where your Sharpe crosses zero — that's your max viable commission.",
+        ],
+        tip="If Sharpe decay (train→test) is more than -0.5 OR Sharpe goes negative at retail costs (~0.1%), don't deploy live."
+    )
     if not go_opt:
-        st.info("Three credibility checks:\n"
-                "1. **Walk-forward** splits the data and tests on unseen periods (not the period you fit on).\n"
-                "2. **Heatmap** sweeps MA windows so you can spot robust parameter regions vs lucky peaks.\n"
-                "3. **Cost sensitivity** raises commission to see if your edge survives realistic trading costs.")
         return
     if not validate_ticker(ticker):
         st.error("Invalid ticker."); return
@@ -1092,29 +1269,67 @@ def render_optimize_page():
     if data is None or data.empty or len(data) < 200:
         st.error("Need at least ~200 bars (about a year)."); return
 
-    # 1. Walk-forward: 70/30 split
+    # 1. Walk-forward: 70/30 split — overlay equity curves with split marker
     st.markdown("### 1) Walk-forward out-of-sample test")
     split_idx = int(len(data) * 0.7)
     train, test = data.iloc[:split_idx], data.iloc[split_idx:]
-    s = MomentumStrategy(20, 50, 14, max_position_size=0.1)
-    _, perf_train = s.backtest(train, cap)
-    _, perf_test = s.backtest(test, cap)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("In-sample (train) return", f"{perf_train['total_return']:.2%}",
-              delta=f"Sharpe {perf_train['sharpe_ratio']:.2f}")
-    c2.metric("Out-of-sample (test) return", f"{perf_test['total_return']:.2%}",
-              delta=f"Sharpe {perf_test['sharpe_ratio']:.2f}")
-    decay = perf_test["sharpe_ratio"] - perf_train["sharpe_ratio"]
-    c3.metric("Sharpe decay (test - train)", f"{decay:+.2f}",
-              help="Negative = strategy degrades on unseen data (overfitting risk).")
-    if decay < -0.5:
-        st.warning("Significant Sharpe decay on out-of-sample data. Strategy may be overfit.")
-    elif decay < -0.2:
-        st.info("Mild Sharpe decay. Acceptable for a momentum strategy.")
-    else:
-        st.success("Out-of-sample performance holds up. Strategy generalizes.")
+    split_date = data.index[split_idx]
 
-    # 2. Parameter heatmap (small grid to stay fast on Railway)
+    s = MomentumStrategy(20, 50, 14, max_position_size=0.1)
+    sig_train, perf_train = s.backtest(train, cap)
+    sig_test, perf_test = s.backtest(test, cap)
+    eq_train = (1 + sig_train["Strategy_Returns"].fillna(0)).cumprod() * cap
+    eq_test = (1 + sig_test["Strategy_Returns"].fillna(0)).cumprod() * cap
+    bh_train = (train["Close"] / train["Close"].iloc[0]) * cap
+    bh_test = (test["Close"] / test["Close"].iloc[0]) * cap
+
+    decay = perf_test["sharpe_ratio"] - perf_train["sharpe_ratio"]
+    verdict_color = "#ff4d6d" if decay < -0.5 else "#ffb547" if decay < -0.2 else "#00d4aa"
+    verdict_text = ("OVERFIT" if decay < -0.5
+                    else "MILD DECAY" if decay < -0.2 else "ROBUST")
+
+    kpi_strip([
+        ("Train return", f"{perf_train['total_return']:+.2%}", "#7c5cff"),
+        ("Test return", f"{perf_test['total_return']:+.2%}",
+         "#00d4aa" if perf_test["total_return"] > 0 else "#ff4d6d"),
+        ("Train Sharpe", f"{perf_train['sharpe_ratio']:.2f}", "#7c5cff"),
+        ("Test Sharpe", f"{perf_test['sharpe_ratio']:.2f}",
+         "#00d4aa" if perf_test["sharpe_ratio"] > 0 else "#ff4d6d"),
+        ("Verdict", verdict_text, verdict_color),
+    ])
+
+    fig_wf = go.Figure()
+    fig_wf.add_trace(go.Scatter(x=eq_train.index, y=eq_train, name="Strategy (train)",
+                                line=dict(color="#7c5cff", width=2)))
+    fig_wf.add_trace(go.Scatter(x=eq_test.index, y=eq_test, name="Strategy (test, OOS)",
+                                line=dict(color="#00d4aa", width=2.5)))
+    fig_wf.add_trace(go.Scatter(x=bh_train.index, y=bh_train, name="Buy & Hold (train)",
+                                line=dict(color="#7c5cff", width=1, dash="dot"),
+                                opacity=0.5))
+    fig_wf.add_trace(go.Scatter(x=bh_test.index, y=bh_test, name="Buy & Hold (test)",
+                                line=dict(color="#00d4aa", width=1, dash="dot"),
+                                opacity=0.5))
+    fig_wf.add_vline(x=split_date, line_dash="dash", line_color="#ffd700",
+                     line_width=2, annotation_text="↓ Train | Test ↓",
+                     annotation_position="top", annotation_font_color="#ffd700")
+    # Shade test region
+    fig_wf.add_vrect(x0=split_date, x1=data.index[-1],
+                     fillcolor="rgba(0,212,170,0.05)", line_width=0)
+    fig_wf.update_layout(template=PLOTLY_TEMPLATE, height=440, hovermode="x unified",
+                         title="Equity curves — train (left of gold line) vs test (right). "
+                               "Test should track or beat buy-and-hold.",
+                         margin=dict(l=10, r=10, t=60, b=10),
+                         legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center"))
+    st.plotly_chart(fig_wf, use_container_width=True)
+
+    if decay < -0.5:
+        st.error("⚠ Significant Sharpe decay on out-of-sample data. Strategy is likely overfit — do NOT deploy live.")
+    elif decay < -0.2:
+        st.warning("Mild Sharpe decay. Borderline — consider retuning or paper-trading first.")
+    else:
+        st.success("✓ Out-of-sample performance holds up. Strategy generalizes.")
+
+    # 2. Parameter heatmap with annotated optimum + best combos bar chart
     st.markdown("### 2) Parameter sensitivity heatmap")
     short_grid = [10, 15, 20, 25, 30]
     long_grid = [40, 50, 60, 80, 100]
@@ -1124,19 +1339,53 @@ def render_optimize_page():
             for j, lo in enumerate(long_grid):
                 if sh < lo:
                     z[i, j] = _quick_backtest_sharpe(data, sh, lo, 14, cap)
-    fig_h = px.imshow(
-        z, x=[str(x) for x in long_grid], y=[str(x) for x in short_grid],
-        color_continuous_scale="RdYlGn", aspect="auto", text_auto=".2f",
-        labels=dict(x="Long MA window", y="Short MA window", color="Sharpe"),
-        title="Sharpe ratio across MA window combinations",
-    )
-    fig_h.update_layout(template=PLOTLY_TEMPLATE, height=380,
-                        margin=dict(l=10, r=10, t=50, b=10))
-    st.plotly_chart(fig_h, use_container_width=True)
-    st.caption("Look for a green **region** (robust). A single green cell surrounded by red = "
-               "lucky parameters, likely won't generalize.")
 
-    # 3. Cost sensitivity
+    cmap_col1, cmap_col2 = st.columns([1.5, 1])
+    with cmap_col1:
+        fig_h = px.imshow(
+            z, x=[str(x) for x in long_grid], y=[str(x) for x in short_grid],
+            color_continuous_scale="RdYlGn", aspect="auto", text_auto=".2f",
+            labels=dict(x="Long MA window", y="Short MA window", color="Sharpe"),
+            title="Sharpe across (Short MA, Long MA) — green region = robust",
+            zmin=-2, zmax=2,
+        )
+        # Highlight optimum cell
+        if np.isfinite(z).any():
+            opt_idx = np.unravel_index(np.nanargmax(z), z.shape)
+            fig_h.add_shape(type="rect",
+                            x0=opt_idx[1] - 0.5, x1=opt_idx[1] + 0.5,
+                            y0=opt_idx[0] - 0.5, y1=opt_idx[0] + 0.5,
+                            line=dict(color="#ffd700", width=3))
+            fig_h.add_annotation(
+                x=opt_idx[1], y=opt_idx[0], text="⭐",
+                showarrow=False, font=dict(size=20),
+                xshift=-25, yshift=15,
+            )
+        fig_h.update_layout(template=PLOTLY_TEMPLATE, height=420,
+                            margin=dict(l=10, r=10, t=60, b=10))
+        st.plotly_chart(fig_h, use_container_width=True)
+    with cmap_col2:
+        # Top-5 combos bar chart
+        flat = []
+        for i, sh in enumerate(short_grid):
+            for j, lo in enumerate(long_grid):
+                if np.isfinite(z[i, j]):
+                    flat.append({"combo": f"{sh}/{lo}", "sharpe": z[i, j]})
+        if flat:
+            top5 = pd.DataFrame(flat).sort_values("sharpe", ascending=False).head(5)
+            fig_top = px.bar(top5, x="sharpe", y="combo", orientation="h",
+                             color="sharpe", color_continuous_scale="RdYlGn",
+                             range_color=[-2, 2],
+                             title="Top 5 parameter combos",
+                             labels={"sharpe": "Sharpe", "combo": "Short/Long"})
+            fig_top.update_layout(template=PLOTLY_TEMPLATE, height=420,
+                                  margin=dict(l=10, r=10, t=60, b=10),
+                                  yaxis=dict(autorange="reversed"),
+                                  showlegend=False, coloraxis_showscale=False)
+            st.plotly_chart(fig_top, use_container_width=True)
+    st.caption("⭐ marks the best cell. Robust strategies show a **block** of green; overfit ones show isolated peaks.")
+
+    # 3. Cost sensitivity — with break-even & reference markers
     st.markdown("### 3) Cost-sensitivity check")
     cost_grid = [0.0, 0.0005, 0.001, 0.002, 0.003, 0.005]
     sharpes, returns = [], []
@@ -1147,28 +1396,56 @@ def render_optimize_page():
             eng = BacktestEngine(initial_capital=cap, commission_rate=c)
             bt = eng.run_backtest(data[["Close"]].copy(), sig[["Signal"]].copy())
             sharpes.append(bt["sharpe_ratio"]); returns.append(bt["total_return"])
-    cs = pd.DataFrame({"Commission %": [c * 100 for c in cost_grid],
-                       "Sharpe": sharpes, "Total Return": returns})
+    cost_pct = [c * 100 for c in cost_grid]
+
+    # Linear interpolate break-even (where Sharpe crosses 0)
+    breakeven = None
+    for i in range(len(sharpes) - 1):
+        if (sharpes[i] >= 0) != (sharpes[i + 1] >= 0):
+            x0, x1 = cost_pct[i], cost_pct[i + 1]
+            y0, y1 = sharpes[i], sharpes[i + 1]
+            breakeven = x0 + (0 - y0) * (x1 - x0) / (y1 - y0) if y1 != y0 else None
+            break
+
     fig_c = make_subplots(specs=[[{"secondary_y": True}]])
-    fig_c.add_trace(go.Scatter(x=cs["Commission %"], y=cs["Sharpe"], name="Sharpe",
-                               line=dict(color="#00d4aa", width=2),
-                               mode="lines+markers"))
-    fig_c.add_trace(go.Scatter(x=cs["Commission %"], y=cs["Total Return"] * 100,
+    fig_c.add_trace(go.Scatter(x=cost_pct, y=sharpes, name="Sharpe",
+                               line=dict(color="#00d4aa", width=3),
+                               mode="lines+markers", marker=dict(size=10),
+                               fill="tozeroy",
+                               fillcolor="rgba(0,212,170,0.10)"))
+    fig_c.add_trace(go.Scatter(x=cost_pct, y=[r * 100 for r in returns],
                                name="Total Return %",
                                line=dict(color="#7c5cff", width=2, dash="dot"),
-                               mode="lines+markers"), secondary_y=True)
+                               mode="lines+markers", marker=dict(size=8)),
+                    secondary_y=True)
+    fig_c.add_hline(y=0, line_dash="dash", line_color="#ff4d6d",
+                    annotation_text="Break-even (Sharpe = 0)",
+                    annotation_position="right", annotation_font_color="#ff4d6d")
+    # Reference broker markers
+    fig_c.add_vline(x=0.1, line_dash="dot", line_color="#8a96aa", opacity=0.6,
+                    annotation_text="Retail (~0.1%)", annotation_position="top",
+                    annotation_font_color="#8a96aa")
+    fig_c.add_vline(x=0.3, line_dash="dot", line_color="#8a96aa", opacity=0.6,
+                    annotation_text="High-touch (~0.3%)", annotation_position="top",
+                    annotation_font_color="#8a96aa")
+    if breakeven is not None:
+        fig_c.add_vline(x=breakeven, line_dash="solid", line_color="#ffd700",
+                        line_width=2,
+                        annotation_text=f"⭐ Max viable: {breakeven:.3f}%",
+                        annotation_position="bottom", annotation_font_color="#ffd700")
     fig_c.update_xaxes(title_text="Commission rate (%)")
     fig_c.update_yaxes(title_text="Sharpe", secondary_y=False)
     fig_c.update_yaxes(title_text="Total return (%)", secondary_y=True)
-    fig_c.update_layout(template=PLOTLY_TEMPLATE, height=380, hovermode="x unified",
-                        title="How much does the edge degrade as costs rise?",
-                        margin=dict(l=10, r=10, t=50, b=10),
-                        legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center"))
+    fig_c.update_layout(template=PLOTLY_TEMPLATE, height=420, hovermode="x unified",
+                        title="Edge degradation as costs rise",
+                        margin=dict(l=10, r=10, t=60, b=10),
+                        legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center"))
     st.plotly_chart(fig_c, use_container_width=True)
+
     if sharpes[0] > 0.5 and sharpes[-1] < 0:
-        st.warning("Edge collapses at higher costs — likely a transaction-cost mirage.")
-    elif sharpes[-1] > 0.5 * sharpes[0]:
-        st.success("Edge survives at realistic retail costs (~0.1-0.2%).")
+        st.warning("⚠ Edge collapses at higher costs — likely a transaction-cost mirage.")
+    elif sharpes[-1] > 0.5 * max(sharpes[0], 0.01):
+        st.success("✓ Edge survives at realistic retail costs (~0.1-0.2%).")
     else:
         st.info("Marginal edge. Be cautious about live deployment.")
 
@@ -1177,6 +1454,18 @@ def render_optimize_page():
 
 def render_backtest_page():
     cfg = render_topbar()
+    how_to_card(
+        "How to use Backtest",
+        [
+            "Pick <b>Single</b> mode for one ticker, or <b>Portfolio</b> for a basket.",
+            "Set dates and capital (defaults work fine to start).",
+            "Open the <b>Strategy & risk parameters</b> expander to tune MA windows / RSI / position size.",
+            "Press <b>Run analysis</b>. Six tabs appear with the results.",
+            "Top tab shows the live <b>BUY/SELL/HOLD</b> banner — what the strategy says today.",
+            "<b>🔧 Diagnostics</b> tab (right-most) shows data quality if numbers look off.",
+        ],
+        tip="The ⭐ gold star on the price chart marks your best trade; the ⚠ red marker is your worst — study both."
+    )
     if cfg["run"]:
         errs = validate_config(cfg)
         if errs:
@@ -1193,7 +1482,10 @@ def render_backtest_page():
         perf = st.session_state.strategy_performance
         backtest_results = st.session_state.backtest_results
         ticker = st.session_state.ticker
-        tabs = st.tabs(["Overview", "Performance", "Risk", "Trades", "Report", "Diagnostics"])
+        tabs = st.tabs([
+            "📈 Overview", "📊 Performance", "⚠️ Risk",
+            "🔄 Trades", "📋 Report", "🔧 Diagnostics",
+        ])
         with tabs[0]: render_overview(ticker, data, signals_df, perf, backtest_results)
         with tabs[1]: render_performance(signals_df, backtest_results, perf)
         with tabs[2]: render_risk(ticker, signals_df)
@@ -1207,18 +1499,28 @@ def render_backtest_page():
 # ---------- Main ----------
 
 def main():
+    st.sidebar.markdown("### 🚀 Navigate")
     page = st.sidebar.radio(
         "Page",
         ["📊 Backtest", "🔭 Watchlist Scanner", "⚖️ Strategy Comparison", "🔬 Optimize & Validate"],
-        index=0,
+        index=0, label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
-    st.sidebar.caption(
-        "**Daily flow**\n\n"
-        "1. Open **Watchlist Scanner** → see which symbols are in BUY/SELL today.\n"
-        "2. Pick one → run **Backtest** to inspect trade history.\n"
-        "3. Use **Compare** to see if momentum even beats alternatives.\n"
-        "4. Use **Optimize** to verify the edge isn't overfit."
+    st.sidebar.markdown(
+        """
+**📅 Daily flow**
+1. **Watchlist Scanner** → today's BUY/SELL signals
+2. **Backtest** → deep-dive a symbol
+3. **Compare** → vs other strategies & benchmarks
+4. **Optimize** → verify edge isn't overfit
+
+---
+
+**🔧 Diagnostics**
+Available as the right-most tab on the Backtest page after running an analysis.
+
+**📘 How-to cards** appear at the top of each page.
+"""
     )
     if page.startswith("📊"): render_backtest_page()
     elif page.startswith("🔭"): render_watchlist_page()

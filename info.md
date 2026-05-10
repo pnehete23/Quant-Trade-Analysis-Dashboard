@@ -91,6 +91,17 @@ quantdashboard/
 - `BacktestEngine.calculate_performance_metrics` now returns a `trades` DataFrame (entry/exit date, prices, qty, P&L, return %, duration). Was previously hidden in `self.trades` and never exposed.
 - Dashboard headline trade count now uses the engine's actual count (e.g., 18-20 real round-trips), not the misleading "294" from `MomentumStrategy.calculate_performance_metrics` which counts every nonzero daily return.
 
+### UX/visual upgrades (round 2)
+- **How-to cards**: every page (Backtest / Watchlist / Compare / Optimize) now has a clear instructional banner at the top — numbered steps + a 💡 Tip line.
+- **Visual KPI strips**: the Backtest Overview and Optimize Walk-forward both show colored KPI ribbons (best/worst trade, MA spread, RSI, train/test verdict).
+- **Price chart**: best trade now annotated with ⭐ gold callout, worst trade with ⚠ red callout — instant identification of pivotal moments.
+- **Equity curve**: max-drawdown period shaded in red, peak marked with gold star, trough with red X, current value with green dot — every key moment is now a visible KPI.
+- **Walk-forward chart**: replaced 3 metric numbers with a real dual equity curve overlaying strategy + buy-and-hold for both train and test periods, with a gold split-marker dividing the regions.
+- **Heatmap**: highlights the optimum cell with ⭐, fixed colorscale (zmin/zmax = ±2 Sharpe) for honest comparison, and a side-by-side **top-5 combos bar chart** so users see the best parameters explicitly.
+- **Cost-sensitivity chart**: now shows the break-even commission rate as a gold vertical line ("Max viable: X%"), plus reference lines for retail (~0.1%) and high-touch (~0.3%) brokers.
+- **Diagnostics promoted**: removed the "you must enable diagnostics" toggle. Diagnostics tab is now always populated and clearly labeled (🔧 emoji on tab). Sidebar advertises it. Inside, the tab now leads with a KPI strip (rows / missing % / signals computed / active signals) so health is visible at a glance.
+- **Sidebar**: clearer "🚀 Navigate" label, structured "📅 Daily flow" guide, and pointer to the diagnostics tab.
+
 ### Daily-user feature pack (4 pages)
 Sidebar now has a page navigator. Single backtest is still the default, plus three new pages designed for repeat daily use:
 
