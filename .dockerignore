@@ -1,0 +1,14 @@
+venv/
+**/venv/
+**/__pycache__/
+*.pyc
+.git/
+.claude/
+offline_backup/
+clv-prediction/
+*.csv
+*.pkl
+data/
+processed/
+market_data/
+.streamlit/secrets.toml
