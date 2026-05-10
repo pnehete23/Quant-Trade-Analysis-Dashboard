@@ -23,11 +23,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     from models.momentum_strategy import MomentumStrategy
+    from models.mean_reversion import MeanReversionStrategy
     from backtesting.backtest_engine import BacktestEngine
     from risk_management.portfolio_risk import PortfolioRiskManager
 except ImportError as e:
     st.error(f"Module import failed: {e}. Ensure src/ modules are on PYTHONPATH.")
     st.stop()
+
+
+# ---------- Default watchlist ----------
+
+DEFAULT_WATCHLIST = "AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA, AVGO, JPM, SPY, QQQ, XLE, XLF, XLK, GLD"
+BENCHMARKS = ["SPY", "QQQ", "IWM"]
 
 
 # ---------- Page config & theme ----------
@@ -36,7 +43,7 @@ st.set_page_config(
     page_title="Quant Trading Analytics",
     page_icon=":chart_with_upwards_trend:",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 PLOTLY_TEMPLATE = "plotly_dark"
@@ -792,11 +799,384 @@ def render_diagnostics(data, signals_df):
         st.dataframe(signals_df[available].tail(15), use_container_width=True)
 
 
-# ---------- Main ----------
+# ---------- Page: Watchlist Scanner ----------
 
-def main():
+@st.cache_data(ttl=900, show_spinner=False)
+def _scan_one(ticker: str, lookback_days: int, short_w: int, long_w: int, rsi_p: int) -> dict | None:
+    end = datetime.now().date()
+    start = end - timedelta(days=lookback_days)
+    df = load_data(ticker, start, end)
+    if df is None or df.empty or len(df) < long_w + 5:
+        return None
+    s = MomentumStrategy(short_window=short_w, long_window=long_w, rsi_period=rsi_p)
+    sig, _ = s.backtest(df, 100_000)
+    last = sig.iloc[-1]
+    last_signal = int(last.get("Signal", 0) or 0)
+    last_close = float(df["Close"].iloc[-1])
+    prev_close = float(df["Close"].iloc[-2]) if len(df) > 1 else last_close
+    chg = (last_close / prev_close - 1) * 100 if prev_close else 0
+    rsi_val = float(last.get("RSI", 0) or 0)
+    # Signal age: days since last change
+    sig_series = sig["Signal"].fillna(0)
+    same = (sig_series == last_signal).iloc[::-1]
+    age = int(same.cumprod().sum())
+    # Distance to MA crossover (proxy for conviction)
+    ms, ml = float(last.get("MA_Short", 0) or 0), float(last.get("MA_Long", 0) or 0)
+    spread = ((ms / ml - 1) * 100) if ml else 0
+    return {
+        "ticker": ticker, "signal": last_signal, "price": last_close,
+        "chg_1d": chg, "rsi": rsi_val, "ma_spread_pct": spread,
+        "signal_age_days": age,
+    }
+
+
+def render_watchlist_page():
+    st.markdown(
+        '<div class="topbar"><h1>Watchlist Scanner</h1>'
+        '<div class="sub">Scan multiple tickers and surface what the strategy says to do today.</div></div>',
+        unsafe_allow_html=True,
+    )
+    c = st.columns([3, 1, 1, 1, 1, 1])
+    with c[0]:
+        raw = st.text_input("Tickers (comma-separated, max 30)", value=DEFAULT_WATCHLIST)
+    with c[1]:
+        lookback = st.selectbox("Lookback", ["6mo", "1y", "2y"], index=1)
+        lookback_days = {"6mo": 200, "1y": 380, "2y": 760}[lookback]
+    with c[2]:
+        sh = st.number_input("Short MA", 5, 100, 20, 1, key="wl_sh")
+    with c[3]:
+        lo = st.number_input("Long MA", 10, 300, 50, 1, key="wl_lo")
+    with c[4]:
+        rs = st.number_input("RSI", 5, 50, 14, 1, key="wl_rs")
+    with c[5]:
+        st.write(""); st.write("")
+        scan = st.button("Scan", type="primary", use_container_width=True)
+
+    if sh >= lo:
+        st.warning("Short MA must be smaller than Long MA.")
+        return
+
+    tickers = [clean_ticker(t) for t in raw.split(",") if validate_ticker(clean_ticker(t))][:30]
+    if scan and tickers:
+        rows = []
+        prog = st.progress(0.0, text="Scanning...")
+        for i, t in enumerate(tickers, 1):
+            r = _scan_one(t, lookback_days, int(sh), int(lo), int(rs))
+            if r:
+                rows.append(r)
+            prog.progress(i / len(tickers), text=f"Scanned {i}/{len(tickers)}")
+        prog.empty()
+        if not rows:
+            st.error("No tickers returned data. Check symbols.")
+            return
+        df = pd.DataFrame(rows)
+
+        # Headline buckets
+        buys = df[df["signal"] == 1].sort_values("ma_spread_pct", ascending=False)
+        sells = df[df["signal"] == -1].sort_values("ma_spread_pct", ascending=True)
+        holds = df[df["signal"] == 0]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Scanned", len(df))
+        c2.metric("BUY signals", len(buys))
+        c3.metric("SELL signals", len(sells))
+        c4.metric("HOLD", len(holds))
+
+        st.markdown("### Currently signaling")
+        sig_label = {1: "BUY", -1: "SELL", 0: "HOLD"}
+        df_show = df.copy()
+        df_show["state"] = df_show["signal"].map(sig_label)
+        df_show = df_show[["ticker", "state", "price", "chg_1d", "rsi",
+                           "ma_spread_pct", "signal_age_days"]]
+        df_show = df_show.sort_values(["state", "ma_spread_pct"],
+                                      ascending=[True, False])
+        st.dataframe(
+            df_show, use_container_width=True, hide_index=True,
+            column_config={
+                "ticker": "Ticker",
+                "state": st.column_config.TextColumn("Signal"),
+                "price": st.column_config.NumberColumn("Price", format="$%.2f"),
+                "chg_1d": st.column_config.NumberColumn("Day %", format="%.2f%%"),
+                "rsi": st.column_config.NumberColumn("RSI", format="%.1f"),
+                "ma_spread_pct": st.column_config.NumberColumn("MA spread %", format="%.2f%%",
+                                                                help="MA Short vs MA Long; magnitude = trend conviction"),
+                "signal_age_days": st.column_config.NumberColumn("Signal age (d)",
+                                                                 help="How long the current signal has been in force"),
+            },
+        )
+
+        # Visual: signal distribution
+        fig = px.bar(df_show.groupby("state").size().reset_index(name="count"),
+                     x="state", y="count", color="state",
+                     color_discrete_map={"BUY": "#00d4aa", "HOLD": "#8a96aa", "SELL": "#ff4d6d"},
+                     title="Signal distribution across watchlist")
+        fig.update_layout(template=PLOTLY_TEMPLATE, height=300, showlegend=False,
+                          margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Enter tickers and press **Scan**. Results cache for 15 minutes.")
+
+
+# ---------- Page: Strategy Comparison ----------
+
+def render_compare_page():
+    st.markdown(
+        '<div class="topbar"><h1>Strategy Comparison</h1>'
+        '<div class="sub">Run momentum, mean-reversion, and buy-and-hold side-by-side on the same data.</div></div>',
+        unsafe_allow_html=True,
+    )
+    c = st.columns([1.5, 1.2, 1.2, 1.2, 1])
+    with c[0]:
+        ticker = st.text_input("Ticker", value="AAPL", key="cmp_t").strip().upper()
+    with c[1]:
+        start = st.date_input("Start", value=datetime.now() - timedelta(days=1095),
+                              max_value=datetime.now(), key="cmp_s")
+    with c[2]:
+        end = st.date_input("End", value=datetime.now(), max_value=datetime.now(), key="cmp_e")
+    with c[3]:
+        cap = st.number_input("Capital ($)", 1000, 10_000_000, 100_000, 10_000, key="cmp_c")
+    with c[4]:
+        st.write(""); st.write("")
+        go_cmp = st.button("Compare", type="primary", use_container_width=True)
+
+    if go_cmp:
+        if not validate_ticker(ticker):
+            st.error("Invalid ticker."); return
+        if start >= end:
+            st.error("Start must be before end."); return
+        with st.spinner(f"Loading {ticker}..."):
+            data = load_data(ticker, start, end)
+        if data is None or data.empty or len(data) < 80:
+            st.error("Insufficient data."); return
+
+        # Strategy 1: Momentum
+        ms = MomentumStrategy(20, 50, 14, max_position_size=0.1)
+        sig_m, perf_m = ms.backtest(data, cap)
+        eng_m = BacktestEngine(initial_capital=cap)
+        bt_m = eng_m.run_backtest(data[["Close"]].copy(), sig_m[["Signal"]].copy())
+
+        # Strategy 2: Mean Reversion
+        try:
+            mr = MeanReversionStrategy(lookback_window=20, entry_threshold=2.0,
+                                       exit_threshold=0.5, max_position_size=0.1)
+            sig_r, perf_r = mr.backtest(data, cap)
+            eng_r = BacktestEngine(initial_capital=cap)
+            bt_r = eng_r.run_backtest(data[["Close"]].copy(), sig_r[["Signal"]].copy())
+            mr_ok = True
+        except Exception as e:
+            st.warning(f"Mean-reversion failed: {e}")
+            sig_r = pd.DataFrame(); perf_r = {}; bt_r = {}; mr_ok = False
+
+        # Strategy 3: Buy-and-Hold
+        bh_curve = (data["Close"] / data["Close"].iloc[0]) * cap
+        bh_ret = (bh_curve.iloc[-1] / cap) - 1
+        bh_dd = ((bh_curve - bh_curve.expanding().max()) / bh_curve.expanding().max()).min()
+        bh_vol = data["Close"].pct_change().std() * np.sqrt(252)
+        bh_sharpe = (data["Close"].pct_change().mean() / data["Close"].pct_change().std()) * np.sqrt(252)
+
+        # Equity curves chart
+        fig = go.Figure()
+        if "portfolio_history" in bt_m:
+            ph = bt_m["portfolio_history"]["Portfolio_Value"]
+            fig.add_trace(go.Scatter(x=ph.index, y=ph, name="Momentum",
+                                     line=dict(color="#00d4aa", width=2)))
+        if mr_ok and "portfolio_history" in bt_r:
+            ph = bt_r["portfolio_history"]["Portfolio_Value"]
+            fig.add_trace(go.Scatter(x=ph.index, y=ph, name="Mean Reversion",
+                                     line=dict(color="#7c5cff", width=2)))
+        fig.add_trace(go.Scatter(x=bh_curve.index, y=bh_curve, name="Buy & Hold",
+                                 line=dict(color="#ffb547", width=2, dash="dash")))
+        fig.update_layout(template=PLOTLY_TEMPLATE, height=460, hovermode="x unified",
+                          title=f"Equity curves on {ticker} (initial ${cap:,})",
+                          margin=dict(l=10, r=10, t=50, b=10),
+                          legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center"))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Comparison table
+        rows = [{
+            "Strategy": "Momentum (MA + RSI)",
+            "Total Return": f"{bt_m['total_return']:.2%}",
+            "Sharpe": f"{bt_m['sharpe_ratio']:.2f}",
+            "Max DD": f"{bt_m['max_drawdown']:.2%}",
+            "Volatility": f"{bt_m['volatility']:.2%}",
+            "Trades": bt_m["total_trades"],
+        }]
+        if mr_ok:
+            rows.append({
+                "Strategy": "Mean Reversion (Z-score)",
+                "Total Return": f"{bt_r['total_return']:.2%}",
+                "Sharpe": f"{bt_r['sharpe_ratio']:.2f}",
+                "Max DD": f"{bt_r['max_drawdown']:.2%}",
+                "Volatility": f"{bt_r['volatility']:.2%}",
+                "Trades": bt_r["total_trades"],
+            })
+        rows.append({
+            "Strategy": "Buy & Hold",
+            "Total Return": f"{bh_ret:.2%}",
+            "Sharpe": f"{bh_sharpe:.2f}",
+            "Max DD": f"{bh_dd:.2%}",
+            "Volatility": f"{bh_vol:.2%}",
+            "Trades": 1,
+        })
+        st.markdown("### Side-by-side")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # Multi-benchmark overlay
+        st.markdown("### Vs broad-market benchmarks")
+        bench_curves = {ticker + " (B&H)": bh_curve / cap}
+        for b in BENCHMARKS:
+            bdf = load_data(b, start, end)
+            if bdf is not None and not bdf.empty:
+                bench_curves[b] = bdf["Close"] / bdf["Close"].iloc[0]
+        if "portfolio_history" in bt_m:
+            ph = bt_m["portfolio_history"]["Portfolio_Value"] / cap
+            bench_curves["Momentum strategy"] = ph
+        bf = pd.DataFrame(bench_curves).dropna(how="all")
+        fig_b = go.Figure()
+        palette = ["#00d4aa", "#7c5cff", "#ffb547", "#4cc9f0", "#ff4d6d"]
+        for i, col in enumerate(bf.columns):
+            fig_b.add_trace(go.Scatter(x=bf.index, y=bf[col], name=col,
+                                       line=dict(color=palette[i % len(palette)], width=1.8)))
+        fig_b.update_layout(template=PLOTLY_TEMPLATE, height=420, hovermode="x unified",
+                            title="Normalized growth (start = 1.0)",
+                            margin=dict(l=10, r=10, t=50, b=10),
+                            legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center"))
+        st.plotly_chart(fig_b, use_container_width=True)
+    else:
+        st.info("Configure and press **Compare** to run all strategies.")
+
+
+# ---------- Page: Optimize (parameter heatmap + walk-forward + cost sensitivity) ----------
+
+def _quick_backtest_sharpe(data: pd.DataFrame, sh: int, lo: int, rsi_p: int,
+                            cap: int, commission: float = 0.001) -> float:
+    if sh >= lo or len(data) < lo + 10:
+        return float("nan")
+    s = MomentumStrategy(short_window=sh, long_window=lo, rsi_period=rsi_p)
+    sig, _ = s.backtest(data, cap)
+    eng = BacktestEngine(initial_capital=cap, commission_rate=commission)
+    bt = eng.run_backtest(data[["Close"]].copy(), sig[["Signal"]].copy())
+    return float(bt.get("sharpe_ratio", float("nan")))
+
+
+def render_optimize_page():
+    st.markdown(
+        '<div class="topbar"><h1>Optimize & Validate</h1>'
+        '<div class="sub">Walk-forward out-of-sample test, parameter sensitivity heatmap, '
+        'and cost-sensitivity check — to spot overfitting and verify edge survives real costs.</div></div>',
+        unsafe_allow_html=True,
+    )
+    c = st.columns([1.5, 1.2, 1.2, 1.2, 1])
+    with c[0]:
+        ticker = st.text_input("Ticker", value="AAPL", key="opt_t").strip().upper()
+    with c[1]:
+        start = st.date_input("Start", value=datetime.now() - timedelta(days=1460),
+                              max_value=datetime.now(), key="opt_s")
+    with c[2]:
+        end = st.date_input("End", value=datetime.now(), max_value=datetime.now(), key="opt_e")
+    with c[3]:
+        cap = st.number_input("Capital ($)", 1000, 10_000_000, 100_000, 10_000, key="opt_c")
+    with c[4]:
+        st.write(""); st.write("")
+        go_opt = st.button("Run", type="primary", use_container_width=True)
+
+    if not go_opt:
+        st.info("Three credibility checks:\n"
+                "1. **Walk-forward** splits the data and tests on unseen periods (not the period you fit on).\n"
+                "2. **Heatmap** sweeps MA windows so you can spot robust parameter regions vs lucky peaks.\n"
+                "3. **Cost sensitivity** raises commission to see if your edge survives realistic trading costs.")
+        return
+    if not validate_ticker(ticker):
+        st.error("Invalid ticker."); return
+    with st.spinner(f"Loading {ticker}..."):
+        data = load_data(ticker, start, end)
+    if data is None or data.empty or len(data) < 200:
+        st.error("Need at least ~200 bars (about a year)."); return
+
+    # 1. Walk-forward: 70/30 split
+    st.markdown("### 1) Walk-forward out-of-sample test")
+    split_idx = int(len(data) * 0.7)
+    train, test = data.iloc[:split_idx], data.iloc[split_idx:]
+    s = MomentumStrategy(20, 50, 14, max_position_size=0.1)
+    _, perf_train = s.backtest(train, cap)
+    _, perf_test = s.backtest(test, cap)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("In-sample (train) return", f"{perf_train['total_return']:.2%}",
+              delta=f"Sharpe {perf_train['sharpe_ratio']:.2f}")
+    c2.metric("Out-of-sample (test) return", f"{perf_test['total_return']:.2%}",
+              delta=f"Sharpe {perf_test['sharpe_ratio']:.2f}")
+    decay = perf_test["sharpe_ratio"] - perf_train["sharpe_ratio"]
+    c3.metric("Sharpe decay (test - train)", f"{decay:+.2f}",
+              help="Negative = strategy degrades on unseen data (overfitting risk).")
+    if decay < -0.5:
+        st.warning("Significant Sharpe decay on out-of-sample data. Strategy may be overfit.")
+    elif decay < -0.2:
+        st.info("Mild Sharpe decay. Acceptable for a momentum strategy.")
+    else:
+        st.success("Out-of-sample performance holds up. Strategy generalizes.")
+
+    # 2. Parameter heatmap (small grid to stay fast on Railway)
+    st.markdown("### 2) Parameter sensitivity heatmap")
+    short_grid = [10, 15, 20, 25, 30]
+    long_grid = [40, 50, 60, 80, 100]
+    with st.spinner(f"Running {len(short_grid) * len(long_grid)} backtests..."):
+        z = np.full((len(short_grid), len(long_grid)), np.nan)
+        for i, sh in enumerate(short_grid):
+            for j, lo in enumerate(long_grid):
+                if sh < lo:
+                    z[i, j] = _quick_backtest_sharpe(data, sh, lo, 14, cap)
+    fig_h = px.imshow(
+        z, x=[str(x) for x in long_grid], y=[str(x) for x in short_grid],
+        color_continuous_scale="RdYlGn", aspect="auto", text_auto=".2f",
+        labels=dict(x="Long MA window", y="Short MA window", color="Sharpe"),
+        title="Sharpe ratio across MA window combinations",
+    )
+    fig_h.update_layout(template=PLOTLY_TEMPLATE, height=380,
+                        margin=dict(l=10, r=10, t=50, b=10))
+    st.plotly_chart(fig_h, use_container_width=True)
+    st.caption("Look for a green **region** (robust). A single green cell surrounded by red = "
+               "lucky parameters, likely won't generalize.")
+
+    # 3. Cost sensitivity
+    st.markdown("### 3) Cost-sensitivity check")
+    cost_grid = [0.0, 0.0005, 0.001, 0.002, 0.003, 0.005]
+    sharpes, returns = [], []
+    with st.spinner("Sweeping commission rates..."):
+        for c in cost_grid:
+            s = MomentumStrategy(20, 50, 14)
+            sig, _ = s.backtest(data, cap)
+            eng = BacktestEngine(initial_capital=cap, commission_rate=c)
+            bt = eng.run_backtest(data[["Close"]].copy(), sig[["Signal"]].copy())
+            sharpes.append(bt["sharpe_ratio"]); returns.append(bt["total_return"])
+    cs = pd.DataFrame({"Commission %": [c * 100 for c in cost_grid],
+                       "Sharpe": sharpes, "Total Return": returns})
+    fig_c = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_c.add_trace(go.Scatter(x=cs["Commission %"], y=cs["Sharpe"], name="Sharpe",
+                               line=dict(color="#00d4aa", width=2),
+                               mode="lines+markers"))
+    fig_c.add_trace(go.Scatter(x=cs["Commission %"], y=cs["Total Return"] * 100,
+                               name="Total Return %",
+                               line=dict(color="#7c5cff", width=2, dash="dot"),
+                               mode="lines+markers"), secondary_y=True)
+    fig_c.update_xaxes(title_text="Commission rate (%)")
+    fig_c.update_yaxes(title_text="Sharpe", secondary_y=False)
+    fig_c.update_yaxes(title_text="Total return (%)", secondary_y=True)
+    fig_c.update_layout(template=PLOTLY_TEMPLATE, height=380, hovermode="x unified",
+                        title="How much does the edge degrade as costs rise?",
+                        margin=dict(l=10, r=10, t=50, b=10),
+                        legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center"))
+    st.plotly_chart(fig_c, use_container_width=True)
+    if sharpes[0] > 0.5 and sharpes[-1] < 0:
+        st.warning("Edge collapses at higher costs — likely a transaction-cost mirage.")
+    elif sharpes[-1] > 0.5 * sharpes[0]:
+        st.success("Edge survives at realistic retail costs (~0.1-0.2%).")
+    else:
+        st.info("Marginal edge. Be cautious about live deployment.")
+
+
+# ---------- Single backtest page (existing) ----------
+
+def render_backtest_page():
     cfg = render_topbar()
-
     if cfg["run"]:
         errs = validate_config(cfg)
         if errs:
@@ -813,7 +1193,6 @@ def main():
         perf = st.session_state.strategy_performance
         backtest_results = st.session_state.backtest_results
         ticker = st.session_state.ticker
-
         tabs = st.tabs(["Overview", "Performance", "Risk", "Trades", "Report", "Diagnostics"])
         with tabs[0]: render_overview(ticker, data, signals_df, perf, backtest_results)
         with tabs[1]: render_performance(signals_df, backtest_results, perf)
@@ -823,6 +1202,28 @@ def main():
         with tabs[5]: render_diagnostics(data, signals_df)
     else:
         st.info("Configure inputs above and press **Run analysis** to begin.")
+
+
+# ---------- Main ----------
+
+def main():
+    page = st.sidebar.radio(
+        "Page",
+        ["📊 Backtest", "🔭 Watchlist Scanner", "⚖️ Strategy Comparison", "🔬 Optimize & Validate"],
+        index=0,
+    )
+    st.sidebar.markdown("---")
+    st.sidebar.caption(
+        "**Daily flow**\n\n"
+        "1. Open **Watchlist Scanner** → see which symbols are in BUY/SELL today.\n"
+        "2. Pick one → run **Backtest** to inspect trade history.\n"
+        "3. Use **Compare** to see if momentum even beats alternatives.\n"
+        "4. Use **Optimize** to verify the edge isn't overfit."
+    )
+    if page.startswith("📊"): render_backtest_page()
+    elif page.startswith("🔭"): render_watchlist_page()
+    elif page.startswith("⚖️"): render_compare_page()
+    elif page.startswith("🔬"): render_optimize_page()
 
 
 if __name__ == "__main__":

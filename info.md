@@ -91,6 +91,20 @@ quantdashboard/
 - `BacktestEngine.calculate_performance_metrics` now returns a `trades` DataFrame (entry/exit date, prices, qty, P&L, return %, duration). Was previously hidden in `self.trades` and never exposed.
 - Dashboard headline trade count now uses the engine's actual count (e.g., 18-20 real round-trips), not the misleading "294" from `MomentumStrategy.calculate_performance_metrics` which counts every nonzero daily return.
 
+### Daily-user feature pack (4 pages)
+Sidebar now has a page navigator. Single backtest is still the default, plus three new pages designed for repeat daily use:
+
+1. **Watchlist Scanner** — scan up to 30 tickers (default: 15 large-cap + sector ETFs) and surface BUY / SELL / HOLD signals with current price, day %, RSI, MA spread (conviction proxy), and signal age. 15-min cache. The "do I open this app daily?" answer.
+2. **Strategy Comparison** — runs Momentum (MA + RSI), Mean Reversion (Z-score), and Buy-and-Hold side-by-side on the same data. Equity curves overlaid; metric table shows return / Sharpe / drawdown / volatility / trade count. Adds a benchmark overlay vs SPY / QQQ / IWM normalized.
+3. **Optimize & Validate** — three credibility checks in one page:
+   - **Walk-forward 70/30 split**: train on first 70%, evaluate on unseen 30%. Surfaces Sharpe decay → overfitting alarm.
+   - **Parameter heatmap**: 5×5 grid of (short MA, long MA) combinations colored by Sharpe. Robust strategies show green *regions*; overfit ones show isolated peaks. Runs in <1s on Railway.
+   - **Cost-sensitivity sweep**: re-runs at commission rates from 0% to 0.5%. Shows whether the edge survives realistic costs or is a transaction-cost mirage.
+4. **Backtest** (existing) — unchanged single-symbol deep dive with action banner, real entry/exit pairs, trade log.
+
+### Mean-reversion wired in
+`models/mean_reversion.py` was sitting unused. Now imported and used in the comparison page. No new dependencies.
+
 ### Interactive chart upgrades
 - **Action banner** above the price chart: declares BUY / SELL / HOLD for today based on the most recent signal, shows current price, and surfaces unrealized P&L on any open position.
 - **Real entry/exit pairs** drawn on the price chart: green ▲ for entries, green ▼ for profitable exits, red ▼ for loss exits. Dotted connector lines colored by P&L make trade outcomes obvious at a glance.
