@@ -342,12 +342,18 @@ def chart_performance(portfolio_history: pd.DataFrame) -> go.Figure:
         trough_val = float(pv.loc[trough_idx])
         max_dd_pct = float(dd_series.min())
 
-        # Shade max-DD window on equity curve
+        # Shade max-DD window — annotation added separately to avoid plotly's
+        # Timestamp-arithmetic bug in shapeannotation._mean
         fig.add_vrect(x0=peak_idx, x1=trough_idx,
                       fillcolor="rgba(255,77,109,0.10)", line_width=0,
-                      annotation_text=f"Max DD: {max_dd_pct:.1f}%",
-                      annotation_position="top left",
-                      annotation_font_color="#ff4d6d", row=1, col=1)
+                      row=1, col=1)
+        fig.add_annotation(x=peak_idx, y=peak_val,
+                           text=f"Max DD: {max_dd_pct:.1f}%",
+                           showarrow=False, xanchor="left", yanchor="bottom",
+                           font=dict(color="#ff4d6d", size=11),
+                           bgcolor="rgba(22,28,39,0.85)",
+                           bordercolor="#ff4d6d", borderwidth=1, borderpad=3,
+                           row=1, col=1)
         # Peak marker (gold star) and trough marker (red X)
         fig.add_trace(go.Scatter(x=[peak_idx], y=[peak_val], mode="markers",
                                  marker=dict(symbol="star", color="#ffd700",
@@ -1309,12 +1315,21 @@ def render_optimize_page():
     fig_wf.add_trace(go.Scatter(x=bh_test.index, y=bh_test, name="Buy & Hold (test)",
                                 line=dict(color="#00d4aa", width=1, dash="dot"),
                                 opacity=0.5))
-    fig_wf.add_vline(x=split_date, line_dash="dash", line_color="#ffd700",
-                     line_width=2, annotation_text="↓ Train | Test ↓",
-                     annotation_position="top", annotation_font_color="#ffd700")
-    # Shade test region
+    # Plotly's add_vline + annotation_text crashes on pandas Timestamps; split into two calls
+    fig_wf.add_vline(x=split_date, line_dash="dash",
+                     line_color="#ffd700", line_width=2)
     fig_wf.add_vrect(x0=split_date, x1=data.index[-1],
                      fillcolor="rgba(0,212,170,0.05)", line_width=0)
+    y_max = float(max(eq_train.max() if len(eq_train) else cap,
+                      eq_test.max() if len(eq_test) else cap,
+                      bh_train.max() if len(bh_train) else cap,
+                      bh_test.max() if len(bh_test) else cap))
+    fig_wf.add_annotation(x=split_date, y=y_max,
+                          text="↓ Train | Test ↓",
+                          showarrow=False, yanchor="bottom",
+                          font=dict(color="#ffd700", size=12),
+                          bgcolor="rgba(22,28,39,0.85)",
+                          bordercolor="#ffd700", borderwidth=1, borderpad=4)
     fig_wf.update_layout(template=PLOTLY_TEMPLATE, height=440, hovermode="x unified",
                          title="Equity curves — train (left of gold line) vs test (right). "
                                "Test should track or beat buy-and-hold.",
