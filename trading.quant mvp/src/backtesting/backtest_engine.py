@@ -279,6 +279,22 @@ class BacktestEngine:
         portfolio_df['Exposure'] = (self.initial_capital - portfolio_df['Cash']) / self.initial_capital
         avg_exposure = portfolio_df['Exposure'].mean()
         
+        # Build a clean trades dataframe for downstream rendering
+        trades_df = pd.DataFrame([
+            {
+                'entry_date': t.entry_date,
+                'exit_date': t.exit_date,
+                'side': t.side,
+                'entry_price': t.entry_price,
+                'exit_price': t.exit_price,
+                'quantity': t.quantity,
+                'pnl': t.pnl,
+                'return_pct': t.return_pct,
+                'duration_days': t.duration,
+            }
+            for t in self.trades if t.exit_date is not None
+        ])
+
         return {
             'total_return': total_return,
             'annualized_return': returns_series.mean() * 252 if len(returns_series) > 0 else 0,
@@ -290,7 +306,8 @@ class BacktestEngine:
             'average_exposure': avg_exposure,
             'portfolio_history': portfolio_df,
             'trade_analysis': trade_analysis,
-            'total_trades': len(self.trades)
+            'total_trades': len(self.trades),
+            'trades': trades_df,
         }
     
     def analyze_trades(self) -> Dict:

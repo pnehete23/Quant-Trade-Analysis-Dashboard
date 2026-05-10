@@ -147,45 +147,119 @@ def load_multiple_data(tickers: tuple, start_date, end_date) -> dict:
 
 # ---------- Charts ----------
 
-def chart_price(data: pd.DataFrame, signals_df: pd.DataFrame | None) -> go.Figure:
+def chart_price(data: pd.DataFrame, signals_df: pd.DataFrame | None,
+                trades_df: pd.DataFrame | None = None) -> go.Figure:
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
-        subplot_titles=("Price & Moving Averages", "RSI", "Volume"),
-        vertical_spacing=0.04, row_heights=[0.62, 0.18, 0.20],
+        subplot_titles=("Price, signals & executed trades", "RSI", "Volume"),
+        vertical_spacing=0.04, row_heights=[0.66, 0.16, 0.18],
     )
     fig.add_trace(
         go.Candlestick(
             x=data.index, open=data["Open"], high=data["High"],
             low=data["Low"], close=data["Close"], name="Price",
             increasing_line_color="#00d4aa", decreasing_line_color="#ff4d6d",
+            showlegend=False,
         ),
         row=1, col=1,
     )
     if signals_df is not None:
         fig.add_trace(go.Scatter(x=signals_df.index, y=signals_df["MA_Short"],
-                                 name="MA Short", line=dict(color="#ffb547", width=1.5)), row=1, col=1)
+                                 name="MA Short", line=dict(color="#ffb547", width=1.4),
+                                 hovertemplate="MA Short: $%{y:.2f}<extra></extra>"), row=1, col=1)
         fig.add_trace(go.Scatter(x=signals_df.index, y=signals_df["MA_Long"],
-                                 name="MA Long", line=dict(color="#7c5cff", width=1.5)), row=1, col=1)
-        buys = signals_df[signals_df["Signal"] == 1]
-        sells = signals_df[signals_df["Signal"] == -1]
-        if not buys.empty:
-            fig.add_trace(go.Scatter(x=buys.index, y=buys["Close"], mode="markers", name="Buy",
-                                     marker=dict(color="#00d4aa", size=9, symbol="triangle-up")),
-                          row=1, col=1)
-        if not sells.empty:
-            fig.add_trace(go.Scatter(x=sells.index, y=sells["Close"], mode="markers", name="Sell",
-                                     marker=dict(color="#ff4d6d", size=9, symbol="triangle-down")),
-                          row=1, col=1)
+                                 name="MA Long", line=dict(color="#7c5cff", width=1.4),
+                                 hovertemplate="MA Long: $%{y:.2f}<extra></extra>"), row=1, col=1)
         fig.add_trace(go.Scatter(x=signals_df.index, y=signals_df["RSI"], name="RSI",
-                                 line=dict(color="#4cc9f0", width=1.4)), row=2, col=1)
-        fig.add_hline(y=70, line_dash="dash", line_color="#ff4d6d", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="#00d4aa", row=2, col=1)
+                                 line=dict(color="#4cc9f0", width=1.3), showlegend=False,
+                                 hovertemplate="RSI: %{y:.1f}<extra></extra>"), row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="#ff4d6d", row=2, col=1,
+                      annotation_text="Overbought", annotation_position="right")
+        fig.add_hline(y=30, line_dash="dash", line_color="#00d4aa", row=2, col=1,
+                      annotation_text="Oversold", annotation_position="right")
 
-    fig.add_trace(go.Bar(x=data.index, y=data["Volume"], name="Volume",
-                         marker_color="rgba(124,92,255,0.5)"), row=3, col=1)
-    fig.update_layout(template=PLOTLY_TEMPLATE, height=720, showlegend=True,
-                      xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=40, b=10),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    # Real executed trades from the engine (entry markers, exit markers, connecting lines)
+    if trades_df is not None and not trades_df.empty:
+        wins = trades_df[trades_df["pnl"] > 0]
+        losses = trades_df[trades_df["pnl"] <= 0]
+
+        # Entry markers
+        fig.add_trace(go.Scatter(
+            x=trades_df["entry_date"], y=trades_df["entry_price"], mode="markers",
+            name="Entry (BUY)", legendgroup="trades",
+            marker=dict(color="#00d4aa", size=12, symbol="triangle-up",
+                        line=dict(color="white", width=1)),
+            customdata=np.stack([trades_df["pnl"], trades_df["return_pct"] * 100,
+                                 trades_df["duration_days"]], axis=-1),
+            hovertemplate=("<b>BUY</b> @ $%{y:.2f}<br>"
+                           "Date: %{x|%Y-%m-%d}<br>"
+                           "Outcome: $%{customdata[0]:+,.2f} "
+                           "(%{customdata[1]:+.2f}%) over %{customdata[2]:.0f}d<extra></extra>"),
+        ), row=1, col=1)
+
+        # Exit markers split by win/loss
+        if not wins.empty:
+            fig.add_trace(go.Scatter(
+                x=wins["exit_date"], y=wins["exit_price"], mode="markers",
+                name="Exit (Profit)", legendgroup="trades",
+                marker=dict(color="#00d4aa", size=12, symbol="triangle-down",
+                            line=dict(color="white", width=1)),
+                customdata=np.stack([wins["pnl"], wins["return_pct"] * 100,
+                                     wins["duration_days"]], axis=-1),
+                hovertemplate=("<b>SELL (WIN)</b> @ $%{y:.2f}<br>"
+                               "Date: %{x|%Y-%m-%d}<br>"
+                               "P&L: $%{customdata[0]:+,.2f} "
+                               "(%{customdata[1]:+.2f}%) over %{customdata[2]:.0f}d<extra></extra>"),
+            ), row=1, col=1)
+        if not losses.empty:
+            fig.add_trace(go.Scatter(
+                x=losses["exit_date"], y=losses["exit_price"], mode="markers",
+                name="Exit (Loss)", legendgroup="trades",
+                marker=dict(color="#ff4d6d", size=12, symbol="triangle-down",
+                            line=dict(color="white", width=1)),
+                customdata=np.stack([losses["pnl"], losses["return_pct"] * 100,
+                                     losses["duration_days"]], axis=-1),
+                hovertemplate=("<b>SELL (LOSS)</b> @ $%{y:.2f}<br>"
+                               "Date: %{x|%Y-%m-%d}<br>"
+                               "P&L: $%{customdata[0]:+,.2f} "
+                               "(%{customdata[1]:+.2f}%) over %{customdata[2]:.0f}d<extra></extra>"),
+            ), row=1, col=1)
+
+        # Connecting lines: entry -> exit, color by P&L
+        for _, t in trades_df.iterrows():
+            color = "rgba(0,212,170,0.45)" if t["pnl"] > 0 else "rgba(255,77,109,0.45)"
+            fig.add_trace(go.Scatter(
+                x=[t["entry_date"], t["exit_date"]],
+                y=[t["entry_price"], t["exit_price"]],
+                mode="lines", line=dict(color=color, width=1.5, dash="dot"),
+                showlegend=False, hoverinfo="skip",
+            ), row=1, col=1)
+
+    fig.add_trace(go.Bar(x=data.index, y=data["Volume"], name="Volume", showlegend=False,
+                         marker_color="rgba(124,92,255,0.45)",
+                         hovertemplate="Vol: %{y:,.0f}<extra></extra>"), row=3, col=1)
+
+    # Range selector + slider for interactivity
+    fig.update_xaxes(
+        rangeselector=dict(
+            buttons=[
+                dict(count=1, label="1M", step="month", stepmode="backward"),
+                dict(count=3, label="3M", step="month", stepmode="backward"),
+                dict(count=6, label="6M", step="month", stepmode="backward"),
+                dict(count=1, label="YTD", step="year", stepmode="todate"),
+                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                dict(step="all", label="All"),
+            ],
+            bgcolor="#161c27", activecolor="#00d4aa", font=dict(color="#e6ebf5"),
+        ),
+        row=1, col=1,
+    )
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE, height=780, hovermode="x unified",
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=60, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0.5, xanchor="center"),
+    )
     return fig
 
 
@@ -332,7 +406,7 @@ def run_portfolio_backtest(strategy: MomentumStrategy, multi_data: dict, capital
         signals_map[sym] = sig_df["Signal"]
     signals_df_port = pd.DataFrame(signals_map).reindex(close_df.index)
 
-    pv_list, cash_list, trade_stats, total_trades, final_value = [], [], [], 0, 0
+    pv_list, cash_list, trade_stats, all_trades, total_trades, final_value = [], [], [], [], 0, 0
     per_symbol_capital = capital / len(close_df.columns)
     for sym in close_df.columns:
         engine_sym = BacktestEngine(initial_capital=per_symbol_capital)
@@ -348,6 +422,11 @@ def run_portfolio_backtest(strategy: MomentumStrategy, multi_data: dict, capital
         if ts:
             trade_stats.append(ts)
             total_trades += ts.get("total_trades", 0)
+        sym_trades = bt.get("trades", pd.DataFrame())
+        if not sym_trades.empty:
+            sym_trades = sym_trades.copy()
+            sym_trades["symbol"] = sym
+            all_trades.append(sym_trades)
         final_value += bt.get("final_portfolio_value", 0)
 
     if not pv_list:
@@ -379,6 +458,8 @@ def run_portfolio_backtest(strategy: MomentumStrategy, multi_data: dict, capital
             "best_trade": float(max([t.get("best_trade", 0) for t in trade_stats], default=0)),
             "worst_trade": float(min([t.get("worst_trade", 0) for t in trade_stats], default=0)),
         },
+        "trades": pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame(),
+        "total_trades": total_trades,
     }
 
 
@@ -427,16 +508,89 @@ def run_pipeline(cfg: dict) -> bool:
 
 # ---------- Renderers ----------
 
-def render_overview(ticker, data, signals_df, perf):
+def render_action_banner(ticker, data, signals_df, trades_df):
+    """Tells the user what the strategy says to do TODAY based on the latest signal."""
+    if signals_df is None or signals_df.empty or "Signal" not in signals_df.columns:
+        return
+    last_signal = int(signals_df["Signal"].iloc[-1] or 0)
+    last_close = float(data["Close"].iloc[-1])
+    last_date = data.index[-1].strftime("%Y-%m-%d")
+
+    in_position = bool(trades_df is not None and not trades_df.empty
+                       and pd.isna(trades_df.iloc[-1].get("exit_date", pd.NaT))) if trades_df is not None else False
+    open_trade = None
+    if trades_df is not None and not trades_df.empty:
+        # Engine closes everything at end of backtest, so use the last trade's open vs close
+        latest = trades_df.iloc[-1]
+        if pd.isna(latest.get("exit_date", pd.NaT)):
+            open_trade = latest
+
+    if last_signal == 1:
+        action, color, emoji = "BUY", "#00d4aa", "▲"
+        sub = f"Strategy is bullish at ${last_close:,.2f}. Enter long if flat."
+    elif last_signal == -1:
+        action, color, emoji = "SELL / EXIT", "#ff4d6d", "▼"
+        sub = f"Strategy is bearish at ${last_close:,.2f}. Close any long position."
+    else:
+        action, color, emoji = "HOLD", "#8a96aa", "■"
+        sub = f"No edge detected at ${last_close:,.2f}. Stay in current state."
+
+    open_html = ""
+    if open_trade is not None:
+        unrealized = (last_close - float(open_trade["entry_price"])) * float(open_trade["quantity"])
+        unrealized_pct = (last_close / float(open_trade["entry_price"]) - 1) * 100
+        u_color = "#00d4aa" if unrealized >= 0 else "#ff4d6d"
+        open_html = (f'<div style="margin-top:.5rem;font-size:.85rem;color:#8a96aa;">'
+                     f'Open position: entered ${float(open_trade["entry_price"]):.2f} on '
+                     f'{pd.to_datetime(open_trade["entry_date"]).strftime("%Y-%m-%d")} · '
+                     f'<span style="color:{u_color};font-weight:600;">'
+                     f'unrealized {unrealized:+,.2f} ({unrealized_pct:+.2f}%)</span></div>')
+
+    st.markdown(
+        f"""
+<div style="background:linear-gradient(135deg,{color}15 0%,#161c27 60%);
+            border:1px solid {color}55;border-left:4px solid {color};
+            border-radius:12px;padding:1rem 1.25rem;margin:1rem 0;">
+  <div style="display:flex;align-items:baseline;gap:.75rem;">
+    <span style="color:{color};font-size:1.4rem;font-weight:700;">{emoji} {action}</span>
+    <span style="color:#8a96aa;font-size:.8rem;">as of {last_date}</span>
+  </div>
+  <div style="color:#e6ebf5;margin-top:.25rem;">{sub}</div>
+  {open_html}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_overview(ticker, data, signals_df, perf, backtest_results):
     st.subheader(f"{ticker} — Strategy Overview")
+    trades_df = backtest_results.get("trades")
+    actual_trades = int(backtest_results.get("total_trades", 0))
+    ta = backtest_results.get("trade_analysis", {})
+    engine_win_rate = ta.get("win_rate", perf.get("win_rate", 0))
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Return", f"{perf['total_return']:.2%}",
-              delta=f"vs Benchmark: {perf['alpha']:+.2%}")
+              delta=f"vs B&H: {perf['alpha']:+.2%}")
     c2.metric("Sharpe Ratio", f"{perf['sharpe_ratio']:.2f}")
     c3.metric("Max Drawdown", f"{perf['max_drawdown']:.2%}")
-    c4.metric("Win Rate", f"{perf['win_rate']:.1%}",
-              delta=f"{perf['total_trades']} trades")
-    st.plotly_chart(chart_price(data, signals_df), use_container_width=True)
+    c4.metric("Win Rate", f"{engine_win_rate:.1%}",
+              delta=f"{actual_trades} executed trades")
+
+    render_action_banner(ticker, data, signals_df, trades_df)
+    st.plotly_chart(chart_price(data, signals_df, trades_df), use_container_width=True)
+
+    with st.expander("How to read this chart", expanded=False):
+        st.markdown("""
+- **Green ▲ markers** = strategy entered a long position (bought).
+- **Green ▼ markers** = position closed at a profit.
+- **Red ▼ markers** = position closed at a loss.
+- **Dotted lines** connect entry → exit for each trade (green = profit, red = loss).
+- **Orange/Purple lines** = short / long moving averages driving the signals.
+- **RSI panel** shows momentum; dashed lines mark overbought (70) / oversold (30).
+- The **action banner** above tells you what the strategy would do *today*.
+""")
 
 
 def render_performance(signals_df, backtest_results, perf):
@@ -524,6 +678,7 @@ def render_risk(ticker, signals_df):
 
 def render_trades(backtest_results):
     ta = backtest_results["trade_analysis"]
+    trades_df = backtest_results.get("trades", pd.DataFrame())
     st.subheader("Trades")
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Trades", ta["total_trades"])
@@ -535,18 +690,47 @@ def render_trades(backtest_results):
     c3.metric("Best Trade", f"${ta['best_trade']:,.2f}")
     c3.metric("Worst Trade", f"${ta['worst_trade']:,.2f}")
     c3.metric("Avg Win", f"${ta['avg_win']:,.2f}")
-    if ta["total_trades"] > 0:
-        rng = np.random.default_rng(42)
-        pnls = np.concatenate([
-            rng.normal(ta["avg_win"], abs(ta["avg_win"]) * 0.5 + 1, max(ta["winning_trades"], 1)),
-            rng.normal(ta["avg_loss"], abs(ta["avg_loss"]) * 0.5 + 1, max(ta["losing_trades"], 1)),
-        ])
-        fig = px.histogram(x=pnls, nbins=40, title="Trade P&L distribution",
-                           labels={"x": "P&L ($)", "y": "Count"},
-                           color_discrete_sequence=["#7c5cff"])
-        fig.add_vline(x=0, line_dash="dash", line_color="#ff4d6d")
-        fig.update_layout(template=PLOTLY_TEMPLATE, height=380, margin=dict(l=10, r=10, t=40, b=10))
+
+    if not trades_df.empty:
+        st.markdown("### Trade log")
+        log = trades_df.copy()
+        log["entry_date"] = pd.to_datetime(log["entry_date"]).dt.strftime("%Y-%m-%d")
+        log["exit_date"] = pd.to_datetime(log["exit_date"]).dt.strftime("%Y-%m-%d")
+        log["entry_price"] = log["entry_price"].round(2)
+        log["exit_price"] = log["exit_price"].round(2)
+        log["pnl"] = log["pnl"].round(2)
+        log["return_pct"] = (log["return_pct"] * 100).round(2)
+        log["result"] = log["pnl"].apply(lambda v: "WIN" if v > 0 else "LOSS")
+        cols = ["entry_date", "exit_date", "side", "entry_price", "exit_price",
+                "quantity", "pnl", "return_pct", "duration_days", "result"]
+        st.dataframe(
+            log[cols].sort_values("entry_date", ascending=False),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "entry_date": "Entered",
+                "exit_date": "Exited",
+                "side": "Side",
+                "entry_price": st.column_config.NumberColumn("Entry $", format="$%.2f"),
+                "exit_price": st.column_config.NumberColumn("Exit $", format="$%.2f"),
+                "quantity": "Qty",
+                "pnl": st.column_config.NumberColumn("P&L $", format="$%.2f"),
+                "return_pct": st.column_config.NumberColumn("Return %", format="%.2f%%"),
+                "duration_days": "Days",
+                "result": "Result",
+            },
+        )
+
+        fig = px.histogram(trades_df, x="pnl", nbins=min(40, max(len(trades_df), 5)),
+                           title="Realized P&L distribution",
+                           color=trades_df["pnl"].apply(lambda v: "Win" if v > 0 else "Loss"),
+                           color_discrete_map={"Win": "#00d4aa", "Loss": "#ff4d6d"},
+                           labels={"pnl": "P&L ($)", "count": "Trades"})
+        fig.add_vline(x=0, line_dash="dash", line_color="white", opacity=0.5)
+        fig.update_layout(template=PLOTLY_TEMPLATE, height=380,
+                          margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No completed trades in this backtest. Try a longer date range or different parameters.")
 
 
 def render_report(ticker, data, signals_df, perf, backtest_results):
@@ -631,7 +815,7 @@ def main():
         ticker = st.session_state.ticker
 
         tabs = st.tabs(["Overview", "Performance", "Risk", "Trades", "Report", "Diagnostics"])
-        with tabs[0]: render_overview(ticker, data, signals_df, perf)
+        with tabs[0]: render_overview(ticker, data, signals_df, perf, backtest_results)
         with tabs[1]: render_performance(signals_df, backtest_results, perf)
         with tabs[2]: render_risk(ticker, signals_df)
         with tabs[3]: render_trades(backtest_results)

@@ -87,6 +87,19 @@ quantdashboard/
 ### Requirements
 - `requirements.txt` deduped (was listing pandas/numpy/streamlit/etc. twice with conflicting comments). Single coherent list with modern minimum versions.
 
+### Backend trade-log surfacing
+- `BacktestEngine.calculate_performance_metrics` now returns a `trades` DataFrame (entry/exit date, prices, qty, P&L, return %, duration). Was previously hidden in `self.trades` and never exposed.
+- Dashboard headline trade count now uses the engine's actual count (e.g., 18-20 real round-trips), not the misleading "294" from `MomentumStrategy.calculate_performance_metrics` which counts every nonzero daily return.
+
+### Interactive chart upgrades
+- **Action banner** above the price chart: declares BUY / SELL / HOLD for today based on the most recent signal, shows current price, and surfaces unrealized P&L on any open position.
+- **Real entry/exit pairs** drawn on the price chart: green ▲ for entries, green ▼ for profitable exits, red ▼ for loss exits. Dotted connector lines colored by P&L make trade outcomes obvious at a glance.
+- **Hover tooltips** on every marker show entry price, exit price, P&L $ + %, and holding period.
+- **Range selector buttons** (1M / 3M / 6M / YTD / 1Y / All) on the price chart.
+- **Unified hover mode** across price/RSI/volume panels.
+- **Trade log table** in the Trades tab: sortable, formatted, with color-coded WIN/LOSS column.
+- **Realized P&L histogram** in the Trades tab now uses actual trade outcomes (win/loss colored), not synthesized random samples.
+
 ## Environment variables
 
 Railway injects automatically:
